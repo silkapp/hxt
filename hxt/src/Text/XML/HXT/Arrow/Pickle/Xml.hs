@@ -42,6 +42,7 @@ where
 
 import           Control.Arrow.ListArrows
 
+import           Data.List (intercalate)
 import           Data.Maybe
 import           Data.Map (Map)
 import qualified Data.Map as M
@@ -88,19 +89,22 @@ filterErrorMessages es = filter ((==deepestPath) . length . snd) es
   where deepestPath = maximum (map (length . snd) es)
 
 printErrorMessage :: ErrorMessage -> String
-printErrorMessage (msg, path) = "Error while parsing XML:\n" ++ printMsg ++ "\n at " ++ printPath path
-  where printMsg = case msg of
-                     ExpectedContent               -> "Expected some content"
-                     ExpectedText                  -> "Expected some text"
-                     ExpectedElem          qn      -> "Expected element '" ++ either id localPart qn ++ "'"
-                     ExpectedElemFoundText qn text -> "Expected element '" ++ localPart qn ++ "', but found text '" ++ text ++ "'"
-                     ExpectedElemFoundElem qn n    -> "Expected element '" ++ localPart qn ++ "', but found element '" ++ localPart n ++ "'"
-                     ExpectedAttribute qn          -> "Missing an attribute '" ++ either id localPart qn ++ "'"
-                     SyntaxError msg               -> "XML syntax error: " ++ msg
-                     CustomError msg               -> msg
-        printPath []     = "the top level"
-        printPath [x]    = x ++ "/"
-        printPath (x:xs) = printPath xs ++ x ++ "/"
+printErrorMessage (msg, path) = "Error while parsing XML:\n" ++ printMsg ++ "\n" ++ printPath path
+  where printMsg =
+          case msg of
+            ExpectedContent               -> "Expected some content"
+            ExpectedText                  -> "Expected some text"
+            ExpectedElem          qn      -> "Expected element '" ++ either id localPart qn ++ "'"
+            ExpectedElemFoundText qn text -> "Expected element '" ++ localPart qn
+                                          ++ "', but found text '" ++ text ++ "'"
+            ExpectedElemFoundElem qn n    -> "Expected element '" ++ localPart qn
+                                          ++ "', but found element '" ++ localPart n ++ "'"
+            ExpectedAttribute qn          -> "Missing an attribute '" ++ either id localPart qn ++ "'"
+            SyntaxError msg               -> "XML syntax error: " ++ msg
+            CustomError msg               -> msg
+
+        printPath [] = "At the top level"
+        printPath xs = "When parsing /" ++ (intercalate "/" . reverse) xs
 
 emptySt         :: St
 emptySt         =  St { attributes = []
