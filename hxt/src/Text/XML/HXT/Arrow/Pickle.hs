@@ -121,8 +121,6 @@ module Text.XML.HXT.Arrow.Pickle
     )
 where
 
-import           Data.Maybe
-
 import           Control.Arrow.ListArrows
 
 import           Text.XML.HXT.DOM.Interface
