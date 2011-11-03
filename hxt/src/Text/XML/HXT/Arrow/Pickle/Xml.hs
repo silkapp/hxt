@@ -88,7 +88,7 @@ filterErrorMessages es = filter ((==deepestPath) . length . snd) es
   where deepestPath = maximum (map (length . snd) es)
 
 printErrorMessage :: ErrorMessage -> String
-printErrorMessage (msg, path) = "Error while parsing XML:\n" ++ printMsg ++ "\n in " ++ printPath path
+printErrorMessage (msg, path) = "Error while parsing XML:\n" ++ printMsg ++ "\n at " ++ printPath path
   where printMsg = case msg of
                      ExpectedContent               -> "Expected some content"
                      ExpectedText                  -> "Expected some text"
@@ -98,7 +98,7 @@ printErrorMessage (msg, path) = "Error while parsing XML:\n" ++ printMsg ++ "\n 
                      ExpectedAttribute qn          -> "Missing an attribute '" ++ either id localPart qn ++ "'"
                      SyntaxError msg               -> "XML syntax error: " ++ msg
                      CustomError msg               -> msg
-        printPath []     = "top level"
+        printPath []     = "the top level"
         printPath [x]    = x ++ "/"
         printPath (x:xs) = printPath xs ++ x ++ "/"
 
