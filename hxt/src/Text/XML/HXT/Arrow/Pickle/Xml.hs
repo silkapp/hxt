@@ -57,19 +57,61 @@ import           Text.XML.HXT.Arrow.XmlArrow
 import           Text.XML.HXT.Arrow.XmlState
 
 -- ------------------------------------------------------------
-
 data St         = St { attributes :: [XmlTree]
                      , contents   :: [XmlTree]
+                     , path       :: Path
                      }
 
 data PU a       = PU { appPickle   :: (a, St) -> St
-                     , appUnPickle :: St -> (Maybe a, St)
+                     , appUnPickle :: St -> (Unpickled a, St)
                      , theSchema   :: Schema
                      }
 
+type Unpickled a = Either [ErrorMessage] a
+type ErrorMessage = (Message, Path)
+data Message = ExpectedMoreContent 
+             | ExpectedText 
+             | ExpectedTagInsteadOfText QName String 
+             | ExpectedTagInsteadOfTag QName QName
+             | NameOrAttrValueDoesNotMatch
+             | MissingAttribute 
+             | MissingAttributes
+             | XMLParseError String 
+             | Unexpected XmlTree
+             | GenericError
+             | CustomUnpickleError String
+             deriving (Eq, Show)
+type Path = [String]
+
+errorMsg :: Message -> St -> (Unpickled a, St)
+errorMsg msg st = (Left [(msg, path st)], st)
+
+filterErrorMessages :: [ErrorMessage] -> [ErrorMessage]
+filterErrorMessages es = filter ((==deepestPath) . length . snd) es
+  where deepestPath = maximum (map (length . snd) es)
+
+printErrorMessage :: ErrorMessage -> String
+printErrorMessage (msg, path) = "Path: " ++ printPath path ++ "\n" ++ printMsg
+  where printMsg = case msg of
+                     ExpectedMoreContent              -> "Expected more content"
+                     ExpectedText                     -> "Expected text"
+                     ExpectedTagInsteadOfText qn text -> "Expected tag " ++ localPart qn ++ " instead of text " ++ text
+                     ExpectedTagInsteadOfTag qn n     -> "Expected tag " ++ localPart qn ++ " instead of tag " ++ localPart n
+                     NameOrAttrValueDoesNotMatch      -> "Name or attribute value does not match" 
+                     MissingAttribute                 -> "Missing an attribute"
+                     MissingAttributes                -> "Missing attributes"
+                     XMLParseError msg                -> "XML parse error: " ++ msg
+                     Unexpected tree                  -> "Unexpected XML: " ++ show tree
+                     GenericError                     -> "Something went wrong while unpickling"
+                     CustomUnpickleError msg          -> msg
+        printPath []     = "top level"
+        printPath [x]    = x ++ "/"
+        printPath (x:xs) = printPath xs ++ x ++ "/"
+            
 emptySt         :: St
 emptySt         =  St { attributes = []
                       , contents   = []
+                      , path       = []
                       }
 
 addAtt          :: XmlTree -> St -> St
@@ -113,11 +155,12 @@ pickleDoc p v
 -- For reconverting a value from an XML tree, is becomes neccessary,
 -- to introduce \"enough\" markup for unpickling the value
 
-unpickleDoc :: PU a -> XmlTree -> Maybe a
+unpickleDoc :: PU a -> XmlTree -> Unpickled a
 unpickleDoc p t
     | XN.isRoot t
         = fst . appUnPickle p $ St { attributes = fromJust . XN.getAttrl $  t
                                    , contents   =            XN.getChildren t
+                                   , path       = []
                                    }
     | otherwise
         = unpickleDoc p (XN.mkRoot [] [t])
@@ -135,11 +178,17 @@ showPickled a = concat . (pickleDoc xpickle >>> runLA (writeDocumentToString a))
 --
 -- Encodes nothing, fails always during unpickling
 
-xpZero                  :: PU a
-xpZero                  =  PU { appPickle   = snd
-                              , appUnPickle = \ s -> (Nothing, s)
+xpZero                  :: Message -> PU a
+xpZero e                =  PU { appPickle   = snd
+                              , appUnPickle = errorMsg e
                               , theSchema   = scNull
                               }
+
+xpZero'                  :: [ErrorMessage] -> PU a
+xpZero' es               =  PU { appPickle   = snd
+                               , appUnPickle = \s -> (Left es, s)
+                               , theSchema   = scNull
+                               }
 
 -- unit pickler
 
@@ -153,7 +202,7 @@ xpUnit                  = xpLift ()
 
 xpLift                  :: a -> PU a
 xpLift x                =  PU { appPickle   = snd
-                              , appUnPickle = \ s -> (Just x, s)
+                              , appUnPickle = \ s -> (Right x, s)
                               , theSchema   = scEmpty
                               }
 
@@ -164,9 +213,14 @@ xpLift x                =  PU { appPickle   = snd
 xpLiftMaybe             :: Maybe a -> PU a
 xpLiftMaybe v           = (xpLiftMaybe' v) { theSchema = scOption scEmpty }
     where
-    xpLiftMaybe' Nothing        = xpZero
+    xpLiftMaybe' Nothing        = xpZero (CustomUnpickleError "Nothing")
     xpLiftMaybe' (Just x)       = xpLift x
 
+xpLiftEither            :: Either String a -> PU a
+xpLiftEither v           = (xpLiftEither' v) { theSchema = scOption scEmpty }
+    where
+    xpLiftEither' (Left e)        = xpZero (CustomUnpickleError e)
+    xpLiftEither' (Right x)       = xpLift x
 
 -- | pickle\/unpickle combinator for sequence and choice.
 --
@@ -176,7 +230,7 @@ xpLiftMaybe v           = (xpLiftMaybe' v) { theSchema = scOption scEmpty }
 --
 -- The schema must be attached later, e.g. in xpPair or other higher level combinators
 
-xpCondSeq       :: PU b -> (b -> a) -> PU a -> (a -> PU b) -> PU b
+xpCondSeq       :: ([ErrorMessage] -> PU b) -> (b -> a) -> PU a -> (a -> PU b) -> PU b
 xpCondSeq pd f pa k
     = PU { appPickle   = ( \ (b, s) ->
                            let
@@ -190,8 +244,8 @@ xpCondSeq pd f pa k
                            (a, s') = appUnPickle pa s
                            in
                            case a of
-                           Nothing -> appUnPickle pd     s
-                           Just a' -> appUnPickle (k a') s'
+                           Left es -> appUnPickle (pd es)     s
+                           Right a' -> appUnPickle (k a') s'
                          )
          , theSchema   = undefined
          }
@@ -203,7 +257,7 @@ xpCondSeq pd f pa k
 -- unpickling, the whole unpickler fails
 
 xpSeq   :: (b -> a) -> PU a -> (a -> PU b) -> PU b
-xpSeq   = xpCondSeq xpZero
+xpSeq   = xpCondSeq xpZero'
 
 
 -- | combine tow picklers with a choice
@@ -214,7 +268,7 @@ xpSeq   = xpCondSeq xpZero
 -- This pickler is only used as combinator for unpickling.
 
 xpChoice                :: PU b -> PU a -> (a -> PU b) -> PU b
-xpChoice pb     = xpCondSeq pb undefined
+xpChoice pb     = xpCondSeq (const pb) undefined
 
 
 -- | map value into another domain and apply pickler there
@@ -231,6 +285,9 @@ xpWrap (i, j) pa        = (xpSeq j pa (xpLift . i)) { theSchema = theSchema pa }
 
 xpWrapMaybe             :: (a -> Maybe b, b -> a) -> PU a -> PU b
 xpWrapMaybe (i, j) pa   = (xpSeq j pa (xpLiftMaybe . i)) { theSchema = theSchema pa }
+
+xpWrapEither             :: (a -> Either String b, b -> a) -> PU a -> PU b
+xpWrapEither (i, j) pa   = (xpSeq j pa (xpLiftEither . i)) { theSchema = theSchema pa }
 
 -- ------------------------------------------------------------
 
@@ -486,15 +543,16 @@ xpText  = xpTextDT scString1
 xpTextDT        :: Schema -> PU String
 xpTextDT sc
     = PU { appPickle   = \ (s, st) -> addCont (XN.mkText s) st
-         , appUnPickle = \ st -> fromMaybe (Nothing, st) (unpickleString st)
+         , appUnPickle = unpickleString
          , theSchema   = sc
          }
     where
     unpickleString st
-        = do
-          t <- getCont st
-          s <- XN.getText t
-          return (Just s, dropCont st)
+        = case getCont st of
+            Nothing -> errorMsg ExpectedMoreContent st
+            Just t -> case XN.getText t of
+                        Nothing -> errorMsg ExpectedText st
+                        Just s -> (Right s, dropCont st)
 
 -- | Pickle a possibly empty string into an XML node.
 --
@@ -544,14 +602,14 @@ xpPrim
 
 xpTree  :: PU XmlTree
 xpTree  = PU { appPickle   = \ (s, st) -> addCont s st
-             , appUnPickle = \ st -> fromMaybe (Nothing, st) (unpickleTree st)
+             , appUnPickle = unpickleTree
              , theSchema   = Any
              }
     where
     unpickleTree st
-        = do
-          t <- getCont st
-          return (Just t, dropCont st)
+        = case getCont st of
+            Nothing -> errorMsg ExpectedMoreContent st
+            Just t -> (Right t, dropCont st)
 
 -- | Pickle a whole list of XmlTrees by just adding the list, unpickle is done by taking all element contents.
 --
@@ -682,7 +740,7 @@ xpAlt tag ps
                          )
          , appUnPickle = appUnPickle $
                          ( case ps of
-                           []     -> xpZero
+                           []     -> (xpZero GenericError)
                            pa:ps1 -> xpChoice (xpAlt tag ps1) pa xpLift
                          )
          , theSchema   = scAlts (map theSchema ps)
@@ -711,21 +769,24 @@ xpElemQN qn pa
                            in
                            addCont (XN.mkElement qn (attributes st') (contents st')) st
                          )
-         , appUnPickle = \ st -> fromMaybe (Nothing, st) (unpickleElement st)
+         , appUnPickle = unpickleElement
          , theSchema   = scElem (qualifiedName qn) (theSchema pa)
          }
       where
       unpickleElement st
-          = do
-            t <- getCont st
-            n <- XN.getElemName t
-            if n /= qn
-               then fail ("element name " ++ show n ++ " does not match" ++ show qn)
-               else do
-                    let cs = XN.getChildren t
-                    al <- XN.getAttrl t
-                    res <- fst . appUnPickle pa $ St {attributes = al, contents = cs}
-                    return (Just res, dropCont st)
+         = case getCont st of
+             Nothing -> errorMsg ExpectedMoreContent st
+             Just t -> case XN.getElemName t of
+                         Nothing -> errorMsg (inspect t) st
+                         Just n | n /= qn -> errorMsg (ExpectedTagInsteadOfTag qn n) st
+                                | otherwise -> case XN.getAttrl t of
+                                                 Nothing -> errorMsg MissingAttributes st
+                                                 Just al -> (fst . appUnPickle pa 
+                                                                     $ St {attributes = al, contents = XN.getChildren t, path = localPart qn : path st}, dropCont st)
+           where 
+           inspect t | XN.isError t = XMLParseError (fromJust (XN.getErrorMsg t))
+                     | XN.isText t  = ExpectedTagInsteadOfText qn (fromJust (XN.getText t))
+                     | otherwise    = Unexpected t
 
 -- | convenient Pickler for xpElemQN
 --
@@ -767,7 +828,7 @@ xpElemWithAttrValue name an av pa
                            in
                            addCont (XN.mkElement (mkName name) (attributes st') (contents st')) st
                          )
-         , appUnPickle = \ st -> fromMaybe (Nothing, st) (unpickleElement st)
+         , appUnPickle = unpickleElement
          , theSchema   = scElem name (theSchema pa')
          }
       where
@@ -779,15 +840,13 @@ xpElemWithAttrValue name an av pa
                                hasAttrValue an (==av)
                              )
       unpickleElement st
-          = do
-            t <- getCont st
-            if noMatch t
-               then fail "element name or attr value does not match"
-               else do
-                    let cs = XN.getChildren t
-                    al <- XN.getAttrl t
-                    res <- fst . appUnPickle pa $ St {attributes = al, contents = cs}
-                    return (Just res, dropCont st)
+         = case getCont st of
+             Nothing -> errorMsg ExpectedMoreContent st
+             Just t | noMatch t -> errorMsg NameOrAttrValueDoesNotMatch st
+                    | otherwise -> case XN.getAttrl t of
+                                     Nothing -> errorMsg MissingAttributes st
+                                     Just al -> (fst . appUnPickle pa 
+                                                         $ St {attributes = al, contents = XN.getChildren t, path = path st}, dropCont st)
 
 -- ------------------------------------------------------------
 
@@ -803,17 +862,14 @@ xpAttrQN qn pa
                            in
                            addAtt (XN.mkAttr qn (contents st')) st
                          )
-         , appUnPickle = \ st -> fromMaybe (Nothing, st) (unpickleAttr st)
+         , appUnPickle = unpickleAttr
          , theSchema   = scAttr (qualifiedName qn) (theSchema pa)
          }
       where
       unpickleAttr st
-          = do
-            a <- getAtt qn st
-            let av = XN.getChildren a
-            res <- fst . appUnPickle pa $ St {attributes = [], contents = av}
-            return (Just res, st)       -- attribute is not removed from attribute list,
-                                        -- attributes are selected by name
+         = case getAtt qn st of
+             Nothing -> errorMsg MissingAttribute st
+             Just a -> (fst . appUnPickle pa $ St {attributes = [], contents = XN.getChildren a, path = path st}, st)
 
 -- | convenient Pickler for xpAttrQN
 --

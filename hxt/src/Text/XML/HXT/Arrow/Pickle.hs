@@ -50,7 +50,10 @@ module Text.XML.HXT.Arrow.Pickle
     , pickleDoc
     , unpickleDoc
     , showPickled
+    , filterErrorMessages
+    , printErrorMessage
 
+    , Unpickled
     , PU(..)
     , XmlPickler
 
@@ -107,6 +110,7 @@ module Text.XML.HXT.Arrow.Pickle
     , xpUnit
     , xpWrap
     , xpWrapMaybe
+    , xpWrapEither
     , xpXmlText
     , xpZero
 
@@ -257,8 +261,8 @@ xpickleVal xp           = arr (pickleDoc xp)
 -- | The arrow version of the unpickler function
 
 xunpickleVal            :: ArrowXml a => PU b -> a XmlTree b
-xunpickleVal xp         = arrL (maybeToList . unpickleDoc xp)
-
+xunpickleVal xp         = arrL (eitherToList . unpickleDoc xp) -- TODO: change to something like arr (unpickleDoc xp)
+  where eitherToList = either (const []) (:[])
 
 -- | Compute the associated DTD of a pickler
 
